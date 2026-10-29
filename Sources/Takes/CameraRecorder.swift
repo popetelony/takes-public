@@ -57,6 +57,8 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     private let output = AVCaptureMovieFileOutput()
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
+    /// The camera and the format to hold it at (camera queue only).
+    private var planned: (AVCaptureDevice, Plan)?
     private var startCont: CheckedContinuation<Date, Error>?
     private var stopCont: CheckedContinuation<Void, Never>?
     private var levelTimer: Timer?
@@ -217,16 +219,8 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                 if conn.isVideoRotationAngleSupported(turn) { conn.videoRotationAngle = turn }
             }
             session.commitConfiguration()
-            // On macOS, setting activeFormat after the session is configured wins over the preset.
-            if let dev = device, let plan, (try? dev.lockForConfiguration()) != nil {
-                dev.activeFormat = plan.format
-                if plan.format.videoSupportedFrameRateRanges.contains(where: { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }) {
-                    let thirty = CMTime(value: 1, timescale: 30)
-                    dev.activeVideoMinFrameDuration = thirty
-                    dev.activeVideoMaxFrameDuration = thirty
-                }
-                dev.unlockForConfiguration()
-            }
+            planned = device.flatMap { d in plan.map { (d, $0) } }
+            applyFormat()
             let crop = plan?.size != nil, label = plan?.label ?? "", turn = plan?.rotate ?? 0
             DispatchQueue.main.async {
                 if self.previewRotation != turn { self.previewRotation = turn }
@@ -234,6 +228,20 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                 if self.formatDescription != label { self.formatDescription = label }
             }
         }
+    }
+
+    /// On the camera queue. startRunning() puts the camera back on the session preset (1920x1080),
+    /// so this runs after configure() and after every start (2026-10-29: Vertical wrote a wide file).
+    private func applyFormat() {
+        // On macOS, setting activeFormat after the session is configured wins over the preset.
+        guard let (dev, plan) = planned, (try? dev.lockForConfiguration()) != nil else { return }
+        dev.activeFormat = plan.format
+        if plan.format.videoSupportedFrameRateRanges.contains(where: { $0.minFrameRate <= 30 && $0.maxFrameRate >= 30 }) {
+            let thirty = CMTime(value: 1, timescale: 30)
+            dev.activeVideoMinFrameDuration = thirty
+            dev.activeVideoMaxFrameDuration = thirty
+        }
+        dev.unlockForConfiguration()
     }
 
     static func bitrate(_ d: CMVideoDimensions) -> Int {
@@ -281,7 +289,9 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
             RunLoop.main.add(t, forMode: .common)
             levelTimer = t
         }
-        queue.async { [self] in run ? session.startRunning() : session.stopRunning() }
+        queue.async { [self] in
+            if run { session.startRunning(); applyFormat() } else { session.stopRunning() }
+        }
     }
 
     /// Turns the camera back on and waits until it delivers frames, so a take never starts black.
