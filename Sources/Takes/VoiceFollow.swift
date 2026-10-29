@@ -33,6 +33,8 @@ final class VoiceFollow {
     /// Bumped on each restart of the listener: a cancelled one's last call does nothing.
     @ObservationIgnored private var gen = 0
     @ObservationIgnored private var wanted = false
+    /// macOS 26: the language is one SpeechTranscriber has. Otherwise (Polish) the older recognizer listens.
+    @ObservationIgnored private var analyzer = false
     @ObservationIgnored private var restarts: [Date] = []
 
     func start() {
@@ -75,11 +77,17 @@ final class VoiceFollow {
         let engine = AVAudioEngine()
         let format = engine.inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0 else { return fail(mine, "Voice follow found no microphone.") }
-        guard let locale = await Self.locale(for: source()) else {
+        var found = await Self.locale(for: source())
+        analyzer = found != nil
+        if found == nil {
+            // SpeechTranscriber lacks some languages (Polish) that SFSpeechRecognizer has.
+            found = Self.recognizerLocale(for: source())
+        }
+        guard let locale = found else {
             let code = ScriptLanguage.code(of: source()) ?? "en"
             return fail(mine, "Voice follow can't hear \(ScriptLanguage.name(code)) on this Mac yet. The script scrolls at the set speed.")
         }
-        if #available(macOS 26, *), !(await SpeechTranscriber.installedLocales).contains(where: { $0.identifier == locale.identifier }) {
+        if #available(macOS 26, *), analyzer, !(await SpeechTranscriber.installedLocales).contains(where: { $0.identifier == locale.identifier }) {
             // The first time in a language, macOS downloads its model: say why nothing moves yet.
             problem("Getting the \(ScriptLanguage.name(locale.language.languageCode?.identifier ?? "")) speech model. Voice follow starts in a moment.")
         }
@@ -116,7 +124,7 @@ final class VoiceFollow {
             guard let self, self.gen == myGen else { return }
             self.fail(mine, why)
         }
-        if #available(macOS 26, *) {
+        if #available(macOS 26, *), analyzer {
             return await AnalyzerListener.make(input: format, locale: locale, hints: hints, heard: heard, problem: report)
         }
         return await RecognizerListener.make(locale: locale, hints: hints, heard: heard, problem: report)
@@ -172,6 +180,14 @@ final class VoiceFollow {
         if #available(macOS 26, *) {
             return ScriptLanguage.pick(code, from: await SpeechTranscriber.supportedLocales, preferred: preferred)
         }
+        return ScriptLanguage.pick(code, from: Array(SFSpeechRecognizer.supportedLocales()), preferred: preferred)
+    }
+
+    /// The locale the older SFSpeechRecognizer has for the script's language: the way in for a
+    /// language SpeechTranscriber lacks.
+    static func recognizerLocale(for script: String) -> Locale? {
+        let code = ScriptLanguage.code(of: script) ?? Locale.current.language.languageCode?.identifier ?? "en"
+        let preferred = [Locale.current] + Locale.preferredLanguages.map { Locale(identifier: $0) }
         return ScriptLanguage.pick(code, from: Array(SFSpeechRecognizer.supportedLocales()), preferred: preferred)
     }
 

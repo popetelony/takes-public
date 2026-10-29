@@ -111,6 +111,17 @@ struct PrompterFollowTests {
         }
     }
 
+    /// SpeechTranscriber has no Polish; the older recognizer does, so Polish listens through it.
+    @Test func polishFallsBackToTheRecognizer() async {
+        let script = "Większość ludzi nigdy nie nagrywa drugiego ujęcia. Oglądają pierwsze i się poddają."
+        guard SFSpeechRecognizer(locale: Locale(identifier: "pl-PL")) != nil else { return }
+        #expect(VoiceFollow.recognizerLocale(for: script)?.identifier == "pl-PL")
+        if #available(macOS 26, *) {
+            let analyzerHas = await SpeechTranscriber.supportedLocales.contains { $0.language.languageCode?.identifier == "pl" }
+            if !analyzerHas { #expect(await VoiceFollow.locale(for: script) == nil) }
+        }
+    }
+
     @Test func hintsAreNamesAndLongWords() {
         let h = VoiceFollow.hints("Today Maya shows Takes, a teleprompter that records. It is free and it is fast.")
         #expect(h.contains("Maya") && h.contains("Takes") && h.contains("teleprompter"))
@@ -193,6 +204,7 @@ struct SpokenFollowTests {
         ("Anna", "Die meisten Leute nehmen nie einen zweiten Take auf. Sie sehen sich den ersten an und geben auf. So änderst du das in zehn Minuten."),
         ("Thomas", "La plupart des gens n'enregistrent jamais une deuxième prise. Ils regardent la première et abandonnent. Voici comment changer cela en dix minutes."),
         ("Eddy (Spanish (Spain))", "La mayoría de la gente nunca graba una segunda toma. Ven la primera y se rinden. Así lo cambias en diez minutos."),
+        ("Zosia", "Większość ludzi nigdy nie nagrywa drugiego ujęcia. Oglądają pierwsze i się poddają. Tak to zmienisz w dziesięć minut."),
     ])
     func followsSpokenAudio(voice: String, script: String) async throws {
         guard ProcessInfo.processInfo.environment["TAKES_SPEECH"] != nil else { return }
@@ -204,12 +216,13 @@ struct SpokenFollowTests {
         say.arguments = ["-v", voice, "-o", file.path, "--file-format=WAVE", "--data-format=LEI16@16000", script]
         try say.run(); say.waitUntilExit()
         let audio = try AVAudioFile(forReading: file)
-        let found = await VoiceFollow.locale(for: script)
+        let analyzed = await VoiceFollow.locale(for: script)
+        let found = analyzed ?? VoiceFollow.recognizerLocale(for: script)
         let locale = try #require(found)
         var follower = ScriptFollower(script)
         var moves = 0
         let listener: Listener? = await {
-            if #available(macOS 26, *) {
+            if #available(macOS 26, *), analyzed != nil {
                 return await AnalyzerListener.make(input: audio.processingFormat, locale: locale, hints: VoiceFollow.hints(script),
                                                    heard: { words, _ in if let words, follower.hear(ScriptFollower.tokens(words)) { moves += 1 } },
                                                    problem: { Issue.record("\($0)") })
